@@ -463,7 +463,7 @@ func run(listen, upstream string, privkey []byte) error {
 
 	// Serve over HTTPS using the generated certificate and key
 	go func() {
-		err := server.ListenAndServeTLS("cert.pem", "key.pem")
+		err := server.ListenAndServeTLS("/etc/letsencrypt/live/srv1.webgnito.com/fullchain.pem", "/etc/letsencrypt/live/srv1.webgnito.com/privkey.pem")
 		done <- fmt.Errorf("ListenAndServeTLS: %w", err)
 	}()
 
@@ -475,7 +475,7 @@ func main() {
 	var privkeyFilename string
 	var privkeyString string
 	var pubkeyFilename string
-	var hostname string
+	//var hostname string
 
 	flag.Usage = func() {
 		fmt.Fprintf(flag.CommandLine.Output(), `Usage:
@@ -493,7 +493,7 @@ Example:
 	flag.StringVar(&privkeyString, "privkey", "", fmt.Sprintf("server private key (%d hex digits)", noise.KeyLen*2))
 	flag.StringVar(&privkeyFilename, "privkey-file", "", "read server private key from file (with -gen-key, write to file)")
 	flag.StringVar(&pubkeyFilename, "pubkey-file", "", "with -gen-key, write server public key to file")
-	flag.StringVar(&hostname, "hostname", "", "with -gen-key, generate certs with this hostname")
+	//flag.StringVar(&hostname, "hostname", "", "with -gen-key, generate certs with this hostname")
 	flag.Parse()
 
 	log.SetFlags(log.LstdFlags | log.LUTC)
@@ -506,26 +506,26 @@ Example:
 			os.Exit(1)
 		}
 
-		if hostname == "" {
-			fmt.Println("hostname is required")
-			os.Exit(1)
-		}
-
-		// Example usage with a common name (hostname)
-		cert, key, err := GenerateWebServerCertificate(hostname)
-		if err != nil {
-			fmt.Printf("Error generating certificate: %v\n", err)
-			os.Exit(1)
-		}
-
-		// Write the certificate and key to files
-		err = WriteCertAndKeyToFile(cert, key)
-		if err != nil {
-			fmt.Printf("Error writing cert and key to file: %v\n", err)
-			os.Exit(1)
-		} else {
-			fmt.Println("Certificate and key successfully written to cert.pem and key.pem")
-		}
+		//if hostname == "" {
+		//	fmt.Println("hostname is required")
+		//	os.Exit(1)
+		//}
+		//
+		//// Example usage with a common name (hostname)
+		//cert, key, err := GenerateWebServerCertificate(hostname)
+		//if err != nil {
+		//	fmt.Printf("Error generating certificate: %v\n", err)
+		//	os.Exit(1)
+		//}
+		//
+		//// Write the certificate and key to files
+		//err = WriteCertAndKeyToFile(cert, key)
+		//if err != nil {
+		//	fmt.Printf("Error writing cert and key to file: %v\n", err)
+		//	os.Exit(1)
+		//} else {
+		//	fmt.Println("Certificate and key successfully written to cert.pem and key.pem")
+		//}
 
 		if err := generateKeypair(privkeyFilename, pubkeyFilename); err != nil {
 			fmt.Fprintf(os.Stderr, "cannot generate keypair: %v\n", err)
