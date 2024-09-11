@@ -445,7 +445,7 @@ func run(listen, upstream string, privkey []byte) error {
 	}
 
 	// Set up a specific handler for /champa path
-	http.HandleFunc("/champa", func(rw http.ResponseWriter, req *http.Request) {
+	http.HandleFunc("/champa/", func(rw http.ResponseWriter, req *http.Request) {
 
 		log.Println("handler func hit")
 
