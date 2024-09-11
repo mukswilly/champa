@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"crypto/tls"
 	"encoding/base64"
 	"errors"
 	"flag"
@@ -10,6 +11,8 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/http/httputil"
+	"net/url"
 	"os"
 	"path"
 	"strings"
@@ -443,30 +446,78 @@ func run(listen, upstream string, privkey []byte) error {
 	handler := &Handler{
 		pconn: noiseConn,
 	}
-
-	// Set up a specific handler for /champa path
-	http.HandleFunc("/champa/", func(rw http.ResponseWriter, req *http.Request) {
-
-		log.Println("handler func hit")
-
-		handler.ServeHTTP(rw, req)
-	})
-
-	// Set up an HTTPS server that listens for /champa/ requests
 	server := &http.Server{
-		Addr:         ":443",
+		Addr:         listen,
+		Handler:      handler,
 		ReadTimeout:  serverReadTimeout,
 		WriteTimeout: serverWriteTimeout,
 		IdleTimeout:  serverIdleTimeout,
-		// Handler is default since we are using http.HandleFunc for routing
+		// The default MaxHeaderBytes is plenty for our purposes.
+	}
+	defer server.Close()
+	go func() {
+		err := server.ListenAndServe()
+		done <- fmt.Errorf("ListenAndServe: %w", err)
+	}()
+
+	// The target URL for the proxy (champa-server's HTTP listening port)
+	target, err := url.Parse("http://127.0.0.1:8080")
+	if err != nil {
+		log.Fatal(err)
 	}
 
-	// Serve over HTTPS using the generated certificate and key
+	// Create a reverse proxy
+	proxy := httputil.NewSingleHostReverseProxy(target)
+
+	// Customize the director function to modify the request
+	proxy.Director = func(req *http.Request) {
+		req.URL.Scheme = target.Scheme
+		req.URL.Host = target.Host
+		req.URL.Path = "/" + req.URL.Path[len("/champa/"):] // Strip "/champa/" prefix
+		req.Host = target.Host
+	}
+
+	// Create a new ServeMux
+	mux := http.NewServeMux()
+
+	// Handle requests to /champa/
+	mux.HandleFunc("/champa/", func(w http.ResponseWriter, r *http.Request) {
+		// Disable logging for this path (optional)
+		log.Printf("Proxying request: %s %s", r.Method, r.URL.Path)
+		proxy.ServeHTTP(w, r)
+	})
+
+	// Load certificates
+	cert, err := tls.LoadX509KeyPair(
+		"/etc/letsencrypt/live/srv1.webgnito.com/fullchain.pem",
+		"/etc/letsencrypt/live/srv1.webgnito.com/privkey.pem",
+	)
+	if err != nil {
+		log.Fatalf("Failed to load certificates: %v", err)
+	}
+
+	// Configure TLS
+	tlsConfig := &tls.Config{
+		Certificates: []tls.Certificate{cert},
+		MinVersion:   tls.VersionTLS12,
+	}
+
+	// Create the server
+	tlsServer := &http.Server{
+		Addr:      ":443",
+		Handler:   mux,
+		TLSConfig: tlsConfig,
+	}
+	defer tlsServer.Close()
 	go func() {
-		err := server.ListenAndServeTLS("/etc/letsencrypt/live/srv1.webgnito.com/fullchain.pem", "/etc/letsencrypt/live/srv1.webgnito.com/privkey.pem")
+		// Start the server
+		log.Println("Starting reverse proxy server on :443")
+		err = tlsServer.ListenAndServeTLS("", "") // Empty strings here because we've already loaded the certs
 		done <- fmt.Errorf("ListenAndServeTLS: %w", err)
 	}()
 
+	// The goroutines are expected to run forever. Return the first error
+	// from any of them.
 	return <-done
 }
 
