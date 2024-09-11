@@ -12,8 +12,6 @@ import (
 	"log"
 	"net"
 	"net/http"
-	"net/http/httputil"
-	"net/url"
 	"os"
 	"path"
 	"strings"
@@ -447,46 +445,6 @@ func run(listen, upstream, hostname string, privkey []byte) error {
 	handler := &Handler{
 		pconn: noiseConn,
 	}
-	server := &http.Server{
-		Addr:         listen,
-		Handler:      handler,
-		ReadTimeout:  serverReadTimeout,
-		WriteTimeout: serverWriteTimeout,
-		IdleTimeout:  serverIdleTimeout,
-		// The default MaxHeaderBytes is plenty for our purposes.
-	}
-	defer server.Close()
-	go func() {
-		err := server.ListenAndServe()
-		done <- fmt.Errorf("ListenAndServe: %w", err)
-	}()
-
-	// The target URL for the proxy (champa-server's HTTP listening port)
-	target, err := url.Parse("http://127.0.0.1:8080")
-	if err != nil {
-		return fmt.Errorf("target url error: %v", err)
-	}
-
-	// Create a reverse proxy
-	proxy := httputil.NewSingleHostReverseProxy(target)
-
-	// Customize the director function to modify the request
-	proxy.Director = func(req *http.Request) {
-		req.URL.Scheme = target.Scheme
-		req.URL.Host = target.Host
-		req.URL.Path = "/" + req.URL.Path[len("/champa/"):] // Strip "/champa/" prefix
-		req.Host = target.Host
-	}
-
-	// Create a new ServeMux
-	mux := http.NewServeMux()
-
-	// Handle requests to /champa/
-	mux.HandleFunc("/champa/", func(w http.ResponseWriter, r *http.Request) {
-		// Disable logging for this path (optional)
-		//log.Printf("Proxying request: %s %s", r.Method, r.URL.Path)
-		proxy.ServeHTTP(w, r)
-	})
 
 	// Create a cache directory for the certificates
 	certDir := "/etc/letsencrypt/live/autocert-cache"
@@ -494,7 +452,7 @@ func run(listen, upstream, hostname string, privkey []byte) error {
 	// Create the autocert manager
 	certManager := autocert.Manager{
 		Prompt:     autocert.AcceptTOS,
-		HostPolicy: autocert.HostWhitelist(hostname), // Replace with your domain
+		HostPolicy: autocert.HostWhitelist(hostname),
 		Cache:      autocert.DirCache(certDir),
 	}
 
@@ -502,8 +460,16 @@ func run(listen, upstream, hostname string, privkey []byte) error {
 	tlsConfig := certManager.TLSConfig()
 	tlsConfig.MinVersion = tls.VersionTLS12 // Ensure minimum TLS 1.2
 
-	// Create the servers
+	// Create a new ServeMux
+	mux := http.NewServeMux()
 
+	// Handle requests to /champa/
+	mux.Handle("/champa/", http.StripPrefix("/champa", handler))
+
+	// Handle all other requests with the existing handler
+	mux.Handle("/", handler)
+
+	// Create the servers
 	httpServer := &http.Server{
 		Addr:    ":80",
 		Handler: certManager.HTTPHandler(nil),
@@ -511,24 +477,27 @@ func run(listen, upstream, hostname string, privkey []byte) error {
 	defer httpServer.Close()
 
 	tlsServer := &http.Server{
-		Addr:      ":443",
-		Handler:   mux,
-		TLSConfig: tlsConfig,
+		Addr:         listen,
+		Handler:      mux,
+		TLSConfig:    tlsConfig,
+		ReadTimeout:  serverReadTimeout,
+		WriteTimeout: serverWriteTimeout,
+		IdleTimeout:  serverIdleTimeout,
 	}
 	defer tlsServer.Close()
 
 	go func() {
 		log.Printf("Starting HTTP server on :80 for ACME challenge")
 		if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("HTTP server error: %v", err)
+			done <- fmt.Errorf("HTTP server error: %v", err)
 		}
 	}()
 
 	go func() {
-		// Start the server
-		log.Println("Starting reverse proxy server on :443")
-		err = tlsServer.ListenAndServeTLS("", "") // Empty strings here because we've already loaded the certs
-		done <- fmt.Errorf("ListenAndServeTLS: %w", err)
+		log.Printf("Starting HTTPS server on %s", listen)
+		if err := tlsServer.ListenAndServeTLS("", ""); err != nil && err != http.ErrServerClosed {
+			done <- fmt.Errorf("HTTPS server error: %v", err)
+		}
 	}()
 
 	// The goroutines are expected to run forever. Return the first error
