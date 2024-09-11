@@ -444,10 +444,10 @@ func run(listen, upstream string, privkey []byte) error {
 		pconn: noiseConn,
 	}
 
-	// Set up a specific handler for /champa/ path
-	http.HandleFunc("/champa/", func(rw http.ResponseWriter, req *http.Request) {
+	// Set up a specific handler for /champa path
+	http.HandleFunc("/champa", func(rw http.ResponseWriter, req *http.Request) {
 
-		fmt.Println("handler func hit")
+		log.Println("handler func hit")
 
 		handler.ServeHTTP(rw, req)
 	})
