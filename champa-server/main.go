@@ -477,7 +477,7 @@ func run(listen, upstream, hostname string, privkey []byte) error {
 	defer httpServer.Close()
 
 	tlsServer := &http.Server{
-		Addr:         listen,
+		Addr:         ":443",
 		Handler:      mux,
 		TLSConfig:    tlsConfig,
 		ReadTimeout:  serverReadTimeout,
