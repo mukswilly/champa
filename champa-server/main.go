@@ -454,7 +454,7 @@ func run(listen, upstream string, privkey []byte) error {
 
 	// Set up an HTTPS server that listens for /champa/ requests
 	server := &http.Server{
-		Addr:         listen,
+		Addr:         ":443",
 		ReadTimeout:  serverReadTimeout,
 		WriteTimeout: serverWriteTimeout,
 		IdleTimeout:  serverIdleTimeout,
