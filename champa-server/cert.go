@@ -7,40 +7,9 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
-	"fmt"
 	"math/big"
-	"os"
 	"time"
 )
-
-// WriteCertAndKeyToFile writes the generated certificate and private key to files.
-func WriteCertAndKeyToFile(cert string, key string) error {
-	// Write the certificate to cert.pem
-	certFile, err := os.Create("cert.pem")
-	if err != nil {
-		return fmt.Errorf("failed to create cert.pem: %v", err)
-	}
-	defer certFile.Close()
-
-	_, err = certFile.Write([]byte(cert))
-	if err != nil {
-		return fmt.Errorf("failed to write certificate to cert.pem: %v", err)
-	}
-
-	// Write the private key to key.pem
-	keyFile, err := os.Create("key.pem")
-	if err != nil {
-		return fmt.Errorf("failed to create key.pem: %v", err)
-	}
-	defer keyFile.Close()
-
-	_, err = keyFile.Write([]byte(key))
-	if err != nil {
-		return fmt.Errorf("failed to write private key to key.pem: %v", err)
-	}
-
-	return nil
-}
 
 // GenerateWebServerCertificate creates a self-signed web server certificate,
 // using the specified host name (commonName).

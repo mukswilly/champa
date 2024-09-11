@@ -416,7 +416,7 @@ func noiseLoop(noiseConn net.PacketConn, plainConn *turbotunnel.QueuePacketConn,
 	}
 }
 
-func run(listen, upstream string, privkey []byte) error {
+func run(listen, upstream, hostname string, privkey []byte) error {
 	done := make(chan error, 10)
 
 	// noiseConn is the packet interface that communicates with the AMP/HTTP
@@ -463,7 +463,7 @@ func run(listen, upstream string, privkey []byte) error {
 	// The target URL for the proxy (champa-server's HTTP listening port)
 	target, err := url.Parse("http://127.0.0.1:8080")
 	if err != nil {
-		log.Fatal(err)
+		return fmt.Errorf("target url error: %v", err)
 	}
 
 	// Create a reverse proxy
@@ -483,17 +483,20 @@ func run(listen, upstream string, privkey []byte) error {
 	// Handle requests to /champa/
 	mux.HandleFunc("/champa/", func(w http.ResponseWriter, r *http.Request) {
 		// Disable logging for this path (optional)
-		log.Printf("Proxying request: %s %s", r.Method, r.URL.Path)
+		//log.Printf("Proxying request: %s %s", r.Method, r.URL.Path)
 		proxy.ServeHTTP(w, r)
 	})
 
-	// Load certificates
-	cert, err := tls.LoadX509KeyPair(
-		"/etc/letsencrypt/live/srv1.webgnito.com/fullchain.pem",
-		"/etc/letsencrypt/live/srv1.webgnito.com/privkey.pem",
-	)
+	// Generate self-signed certificate
+	certPEM, keyPEM, err := GenerateWebServerCertificate(hostname)
 	if err != nil {
-		log.Fatalf("Failed to load certificates: %v", err)
+		return fmt.Errorf("failed to generate certificate: %v", err)
+	}
+
+	// Load the generated certificate
+	cert, err := tls.X509KeyPair([]byte(certPEM), []byte(keyPEM))
+	if err != nil {
+		return fmt.Errorf("failed to load certificate: %v", err)
 	}
 
 	// Configure TLS
@@ -526,7 +529,7 @@ func main() {
 	var privkeyFilename string
 	var privkeyString string
 	var pubkeyFilename string
-	//var hostname string
+	var hostname string
 
 	flag.Usage = func() {
 		fmt.Fprintf(flag.CommandLine.Output(), `Usage:
@@ -544,7 +547,7 @@ Example:
 	flag.StringVar(&privkeyString, "privkey", "", fmt.Sprintf("server private key (%d hex digits)", noise.KeyLen*2))
 	flag.StringVar(&privkeyFilename, "privkey-file", "", "read server private key from file (with -gen-key, write to file)")
 	flag.StringVar(&pubkeyFilename, "pubkey-file", "", "with -gen-key, write server public key to file")
-	//flag.StringVar(&hostname, "hostname", "", "with -gen-key, generate certs with this hostname")
+	flag.StringVar(&hostname, "hostname", "", "with -gen-key, generate certs with this hostname")
 	flag.Parse()
 
 	log.SetFlags(log.LstdFlags | log.LUTC)
@@ -557,27 +560,6 @@ Example:
 			os.Exit(1)
 		}
 
-		//if hostname == "" {
-		//	fmt.Println("hostname is required")
-		//	os.Exit(1)
-		//}
-		//
-		//// Example usage with a common name (hostname)
-		//cert, key, err := GenerateWebServerCertificate(hostname)
-		//if err != nil {
-		//	fmt.Printf("Error generating certificate: %v\n", err)
-		//	os.Exit(1)
-		//}
-		//
-		//// Write the certificate and key to files
-		//err = WriteCertAndKeyToFile(cert, key)
-		//if err != nil {
-		//	fmt.Printf("Error writing cert and key to file: %v\n", err)
-		//	os.Exit(1)
-		//} else {
-		//	fmt.Println("Certificate and key successfully written to cert.pem and key.pem")
-		//}
-
 		if err := generateKeypair(privkeyFilename, pubkeyFilename); err != nil {
 			fmt.Fprintf(os.Stderr, "cannot generate keypair: %v\n", err)
 			os.Exit(1)
@@ -589,6 +571,12 @@ Example:
 			flag.Usage()
 			os.Exit(1)
 		}
+
+		if hostname == "" {
+			fmt.Println("hostname is required")
+			os.Exit(1)
+		}
+
 		listen := flag.Arg(0)
 		upstream := flag.Arg(1)
 		// We keep upstream as a string in order to eventually pass it to
@@ -636,7 +624,7 @@ Example:
 			log.Printf("pubkey %x", noise.PubkeyFromPrivkey(privkey))
 		}
 
-		err := run(listen, upstream, privkey)
+		err := run(listen, upstream, hostname, privkey)
 		if err != nil {
 			log.Fatal(err)
 		}
