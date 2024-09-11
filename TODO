@@ -1,0 +1,14 @@
+Man page.
+
+Protocol documentation.
+
+uTLS support.
+
+Use a more precise URL length bound in PollingPacketConn, found by
+binary search on encoded URLs. Use SetMtu so that several maximum-size
+packets fit comfortably in the maximum size.
+
+Have the client self-throttle when receiving an unexpected response
+(such as the status 200 pseudo-redirects).
+
+Use random padding in the server when sending back an empty response.
