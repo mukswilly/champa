@@ -443,22 +443,30 @@ func run(listen, upstream string, privkey []byte) error {
 	handler := &Handler{
 		pconn: noiseConn,
 	}
+
+	// Set up a specific handler for /champa/ path
+	http.HandleFunc("/champa/", func(rw http.ResponseWriter, req *http.Request) {
+
+		fmt.Println("handler func hit")
+
+		handler.ServeHTTP(rw, req)
+	})
+
+	// Set up an HTTPS server that listens for /champa/ requests
 	server := &http.Server{
 		Addr:         listen,
-		Handler:      handler,
 		ReadTimeout:  serverReadTimeout,
 		WriteTimeout: serverWriteTimeout,
 		IdleTimeout:  serverIdleTimeout,
-		// The default MaxHeaderBytes is plenty for our purposes.
+		// Handler is default since we are using http.HandleFunc for routing
 	}
-	defer server.Close()
+
+	// Serve over HTTPS using the generated certificate and key
 	go func() {
-		err := server.ListenAndServe()
-		done <- fmt.Errorf("ListenAndServe: %w", err)
+		err := server.ListenAndServeTLS("cert.pem", "key.pem")
+		done <- fmt.Errorf("ListenAndServeTLS: %w", err)
 	}()
 
-	// The goroutines are expected to run forever. Return the first error
-	// from any of them.
 	return <-done
 }
 
@@ -467,6 +475,7 @@ func main() {
 	var privkeyFilename string
 	var privkeyString string
 	var pubkeyFilename string
+	var hostname string
 
 	flag.Usage = func() {
 		fmt.Fprintf(flag.CommandLine.Output(), `Usage:
@@ -484,6 +493,7 @@ Example:
 	flag.StringVar(&privkeyString, "privkey", "", fmt.Sprintf("server private key (%d hex digits)", noise.KeyLen*2))
 	flag.StringVar(&privkeyFilename, "privkey-file", "", "read server private key from file (with -gen-key, write to file)")
 	flag.StringVar(&pubkeyFilename, "pubkey-file", "", "with -gen-key, write server public key to file")
+	flag.StringVar(&hostname, "hostname", "", "with -gen-key, generate certs with this hostname")
 	flag.Parse()
 
 	log.SetFlags(log.LstdFlags | log.LUTC)
@@ -495,6 +505,28 @@ Example:
 			flag.Usage()
 			os.Exit(1)
 		}
+
+		if hostname == "" {
+			fmt.Println("hostname is required")
+			os.Exit(1)
+		}
+
+		// Example usage with a common name (hostname)
+		cert, key, err := GenerateWebServerCertificate(hostname)
+		if err != nil {
+			fmt.Printf("Error generating certificate: %v\n", err)
+			os.Exit(1)
+		}
+
+		// Write the certificate and key to files
+		err = WriteCertAndKeyToFile(cert, key)
+		if err != nil {
+			fmt.Printf("Error writing cert and key to file: %v\n", err)
+			os.Exit(1)
+		} else {
+			fmt.Println("Certificate and key successfully written to cert.pem and key.pem")
+		}
+
 		if err := generateKeypair(privkeyFilename, pubkeyFilename); err != nil {
 			fmt.Fprintf(os.Stderr, "cannot generate keypair: %v\n", err)
 			os.Exit(1)
