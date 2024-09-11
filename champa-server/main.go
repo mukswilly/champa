@@ -7,6 +7,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"golang.org/x/crypto/acme/autocert"
 	"io"
 	"log"
 	"net"
@@ -487,31 +488,42 @@ func run(listen, upstream, hostname string, privkey []byte) error {
 		proxy.ServeHTTP(w, r)
 	})
 
-	// Generate self-signed certificate
-	certPEM, keyPEM, err := GenerateWebServerCertificate(hostname)
-	if err != nil {
-		return fmt.Errorf("failed to generate certificate: %v", err)
+	// Create a cache directory for the certificates
+	certDir := "/etc/letsencrypt/live/autocert-cache"
+
+	// Create the autocert manager
+	certManager := autocert.Manager{
+		Prompt:     autocert.AcceptTOS,
+		HostPolicy: autocert.HostWhitelist(hostname), // Replace with your domain
+		Cache:      autocert.DirCache(certDir),
 	}
 
-	// Load the generated certificate
-	cert, err := tls.X509KeyPair([]byte(certPEM), []byte(keyPEM))
-	if err != nil {
-		return fmt.Errorf("failed to load certificate: %v", err)
-	}
+	// Create a TLS config using the autocert manager
+	tlsConfig := certManager.TLSConfig()
+	tlsConfig.MinVersion = tls.VersionTLS12 // Ensure minimum TLS 1.2
 
-	// Configure TLS
-	tlsConfig := &tls.Config{
-		Certificates: []tls.Certificate{cert},
-		MinVersion:   tls.VersionTLS12,
-	}
+	// Create the servers
 
-	// Create the server
+	httpServer := &http.Server{
+		Addr:    ":80",
+		Handler: certManager.HTTPHandler(nil),
+	}
+	defer httpServer.Close()
+
 	tlsServer := &http.Server{
 		Addr:      ":443",
 		Handler:   mux,
 		TLSConfig: tlsConfig,
 	}
 	defer tlsServer.Close()
+
+	go func() {
+		log.Printf("Starting HTTP server on :80 for ACME challenge")
+		if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("HTTP server error: %v", err)
+		}
+	}()
+
 	go func() {
 		// Start the server
 		log.Println("Starting reverse proxy server on :443")
@@ -547,7 +559,7 @@ Example:
 	flag.StringVar(&privkeyString, "privkey", "", fmt.Sprintf("server private key (%d hex digits)", noise.KeyLen*2))
 	flag.StringVar(&privkeyFilename, "privkey-file", "", "read server private key from file (with -gen-key, write to file)")
 	flag.StringVar(&pubkeyFilename, "pubkey-file", "", "with -gen-key, write server public key to file")
-	flag.StringVar(&hostname, "hostname", "", "with -gen-key, generate certs with this hostname")
+	flag.StringVar(&hostname, "hostname", "", "generate certs with this hostname")
 	flag.Parse()
 
 	log.SetFlags(log.LstdFlags | log.LUTC)
