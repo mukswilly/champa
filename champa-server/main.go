@@ -415,7 +415,7 @@ func noiseLoop(noiseConn net.PacketConn, plainConn *turbotunnel.QueuePacketConn,
 	}
 }
 
-func run(listen, upstream, hostname string, privkey []byte) error {
+func run(upstream, hostname string, privkey []byte) error {
 	done := make(chan error, 10)
 
 	// noiseConn is the packet interface that communicates with the AMP/HTTP
@@ -446,6 +446,15 @@ func run(listen, upstream, hostname string, privkey []byte) error {
 		pconn: noiseConn,
 	}
 
+	// Create a new ServeMux
+	mux := http.NewServeMux()
+
+	// Handle requests to /champa/
+	mux.Handle("/champa/", http.StripPrefix("/champa", handler))
+
+	// Handle all other requests with the existing handler
+	mux.Handle("/", handler)
+
 	// Create a cache directory for the certificates
 	certDir := "/etc/letsencrypt/live/autocert-cache"
 
@@ -459,15 +468,6 @@ func run(listen, upstream, hostname string, privkey []byte) error {
 	// Create a TLS config using the autocert manager
 	tlsConfig := certManager.TLSConfig()
 	tlsConfig.MinVersion = tls.VersionTLS12 // Ensure minimum TLS 1.2
-
-	// Create a new ServeMux
-	mux := http.NewServeMux()
-
-	// Handle requests to /champa/
-	mux.Handle("/champa/", http.StripPrefix("/champa", handler))
-
-	// Handle all other requests with the existing handler
-	mux.Handle("/", handler)
 
 	// Create the servers
 	httpServer := &http.Server{
@@ -488,14 +488,14 @@ func run(listen, upstream, hostname string, privkey []byte) error {
 
 	go func() {
 		log.Printf("Starting HTTP server on :80 for ACME challenge")
-		if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		if err := httpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			done <- fmt.Errorf("HTTP server error: %v", err)
 		}
 	}()
 
 	go func() {
-		log.Printf("Starting HTTPS server on %s", listen)
-		if err := tlsServer.ListenAndServeTLS("", ""); err != nil && err != http.ErrServerClosed {
+		log.Printf("Starting HTTPS server on :443")
+		if err := tlsServer.ListenAndServeTLS("", ""); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			done <- fmt.Errorf("HTTPS server error: %v", err)
 		}
 	}()
@@ -519,7 +519,7 @@ func main() {
 
 Example:
   %[1]s -gen-key -privkey-file server.key -pubkey-file server.pub
-  %[1]s -privkey-file server.key 127.0.0.1:8080 127.0.0.1:7001
+  %[1]s -privkey-file server.key 127.0.0.1:7001
 
 `, os.Args[0])
 		flag.PrintDefaults()
@@ -548,7 +548,7 @@ Example:
 	} else {
 		// Ordinary server mode.
 
-		if flag.NArg() != 2 {
+		if flag.NArg() != 1 {
 			flag.Usage()
 			os.Exit(1)
 		}
@@ -558,8 +558,7 @@ Example:
 			os.Exit(1)
 		}
 
-		listen := flag.Arg(0)
-		upstream := flag.Arg(1)
+		upstream := flag.Arg(0)
 		// We keep upstream as a string in order to eventually pass it to
 		// net.Dial in handleStream. But we do a preliminary resolution of the
 		// name here, in order to exit with a quick error at startup if the
@@ -605,7 +604,7 @@ Example:
 			log.Printf("pubkey %x", noise.PubkeyFromPrivkey(privkey))
 		}
 
-		err := run(listen, upstream, hostname, privkey)
+		err := run(upstream, hostname, privkey)
 		if err != nil {
 			log.Fatal(err)
 		}
