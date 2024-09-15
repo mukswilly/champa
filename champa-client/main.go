@@ -33,81 +33,6 @@ func readKeyFromFile(filename string) ([]byte, error) {
 	return noise.ReadKey(f)
 }
 
-// noisePacketConn implements the net.PacketConn interface. It acts as an
-// intermediary between an upper layer and an inner net.PacketConn, decrypting
-// packets on ReadFrom and encrypting them on WriteTo.
-type noisePacketConn struct {
-	sess *noise.Session
-	net.PacketConn
-}
-
-// readNoiseMessageOfTypeFrom returns the first complete Noise message whose
-// msgTime is wantedType, discarding messages of any other msgType.
-func readNoiseMessageOfTypeFrom(conn net.PacketConn, wantedType byte) ([]byte, net.Addr, error) {
-	for {
-		msgType, msg, addr, err := noise.ReadMessageFrom(conn)
-		if err != nil {
-			if err, ok := err.(net.Error); ok && err.Temporary() {
-				continue
-			}
-			return nil, nil, err
-		}
-		if msgType == wantedType {
-			return msg, addr, nil
-		}
-	}
-}
-
-// noiseDial performs a Noise handshake over the given net.PacketConn, and
-// returns a noisePacketConn with a working noise.Session.
-func noiseDial(conn net.PacketConn, addr net.Addr, pubkey []byte) (*noisePacketConn, error) {
-	p := []byte{noise.MsgTypeHandshakeInit}
-	pre, p, err := noise.InitiateHandshake(p, pubkey)
-	if err != nil {
-		return nil, err
-	}
-	// TODO: timeout or context
-	_, err = conn.WriteTo(p, addr)
-	if err != nil {
-		return nil, err
-	}
-
-	msg, _, err := readNoiseMessageOfTypeFrom(conn, noise.MsgTypeHandshakeResp)
-	if err != nil {
-		return nil, err
-	}
-
-	sess, err := pre.FinishHandshake(msg)
-	if err != nil {
-		return nil, err
-	}
-
-	return &noisePacketConn{sess, conn}, nil
-}
-
-// ReadFrom implements the net.PacketConn interface for noisePacketConn.
-func (c *noisePacketConn) ReadFrom(p []byte) (int, net.Addr, error) {
-	msg, addr, err := readNoiseMessageOfTypeFrom(c.PacketConn, noise.MsgTypeTransport)
-	if err != nil {
-		return 0, nil, err
-	}
-	dec, err := c.sess.Decrypt(nil, msg)
-	if err != nil {
-		return 0, nil, err
-	}
-	return copy(p, dec), addr, nil
-}
-
-// WriteTo implements the net.PacketConn interface for noisePacketConn.
-func (c *noisePacketConn) WriteTo(p []byte, addr net.Addr) (int, error) {
-	buf := []byte{noise.MsgTypeTransport}
-	buf, err := c.sess.Encrypt(buf, p)
-	if err != nil {
-		return 0, err
-	}
-	return c.PacketConn.WriteTo(buf, addr)
-}
-
 func handle(local *net.TCPConn, sess *smux.Session, conv uint32) error {
 	stream, err := sess.OpenStream()
 	if err != nil {
@@ -166,15 +91,8 @@ func run(serverURL, cacheURL *url.URL, front, localAddr string, pubkey []byte) e
 	pconn := NewPollingPacketConn(turbotunnel.DummyAddr{}, poll)
 	defer pconn.Close()
 
-	// Add a Noise layer over the AMP polling to encrypt and authenticate
-	// each KCP packet.
-	nconn, err := noiseDial(pconn, turbotunnel.DummyAddr{}, pubkey)
-	if err != nil {
-		return err
-	}
-
-	// Open a KCP conn over the Noise layer.
-	conn, err := kcp.NewConn2(turbotunnel.DummyAddr{}, nil, 0, 0, nconn)
+	// Open a KCP conn on the PacketConn.
+	conn, err := kcp.NewConn2(turbotunnel.DummyAddr{}, nil, 0, 0, pconn)
 	if err != nil {
 		return fmt.Errorf("opening KCP conn: %v", err)
 	}
@@ -203,13 +121,19 @@ func run(serverURL, cacheURL *url.URL, front, localAddr string, pubkey []byte) e
 	// to permit one more packet per request, we should do it.
 	// E.g. 1400*5 = 7000, but 1320*6 = 7920.
 
+	// Put a Noise channel on top of the KCP conn.
+	rw, err := noise.NewClient(conn, pubkey)
+	if err != nil {
+		return err
+	}
+
 	// Start a smux session on the Noise channel.
 	smuxConfig := smux.DefaultConfig()
 	smuxConfig.Version = 2
 	smuxConfig.KeepAliveTimeout = idleTimeout
 	smuxConfig.MaxReceiveBuffer = 4 * 1024 * 1024 // default is 4 * 1024 * 1024
 	smuxConfig.MaxStreamBuffer = 1 * 1024 * 1024  // default is 65536
-	sess, err := smux.Client(conn, smuxConfig)
+	sess, err := smux.Client(rw, smuxConfig)
 	if err != nil {
 		return fmt.Errorf("opening smux session: %v", err)
 	}

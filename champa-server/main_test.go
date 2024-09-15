@@ -22,6 +22,13 @@ func TestDecodeRequest(t *testing.T) {
 	defPayload := []byte("abcde")
 	defEncoded := string(base64.RawURLEncoding.EncodeToString(bytes.Join([][]byte{defClientID[:], defPayload}, nil)))
 
+	// Only GET is allowed.
+	req := mustNewRequest("POST", "/0/XXXX/"+defEncoded)
+	clientID, payload := decodeRequest(req)
+	if payload != nil {
+		t.Errorf("POST request → (%v, %+q)", clientID, payload)
+	}
+
 	for _, test := range []struct {
 		path             string
 		expectedClientID turbotunnel.ClientID

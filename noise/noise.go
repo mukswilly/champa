@@ -8,10 +8,11 @@ package noise
 import (
 	"bufio"
 	"crypto/rand"
+	"encoding/binary"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
-	"net"
 	"strings"
 
 	"github.com/flynn/noise"
@@ -21,26 +22,107 @@ import (
 // The length of public and private keys as returned by GeneratePrivkey.
 const KeyLen = 32
 
-const (
-	MsgTypeHandshakeInit = 1
-	MsgTypeHandshakeResp = 2
-	MsgTypeTransport     = 4
-)
-
 // cipherSuite represents 25519_ChaChaPoly_BLAKE2s.
 var cipherSuite = noise.NewCipherSuite(noise.DH25519, noise.CipherChaChaPoly, noise.HashBLAKE2s)
 
-func ReadMessageFrom(conn net.PacketConn) (byte, []byte, net.Addr, error) {
-	var buf [1500]byte
-	for {
-		n, addr, err := conn.ReadFrom(buf[:])
-		if err != nil {
-			return 0, nil, nil, err
-		}
-		if n >= 1 {
-			return buf[0], buf[1:n], addr, nil
-		}
+// readMessage reads a length-prefixed message from r. It returns a nil error
+// only when a complete message was read. It returns io.EOF only when there were
+// 0 bytes remaining to read from r. It returns io.ErrUnexpectedEOF when EOF
+// occurs in the middle of an encoded message.
+func readMessage(r io.Reader) ([]byte, error) {
+	var length uint16
+	err := binary.Read(r, binary.BigEndian, &length)
+	if err != nil {
+		// We may return a real io.EOF only here.
+		return nil, err
 	}
+	msg := make([]byte, int(length))
+	_, err = io.ReadFull(r, msg)
+	// Here we must change io.EOF to io.ErrUnexpectedEOF.
+	if err == io.EOF {
+		err = io.ErrUnexpectedEOF
+	}
+	return msg, err
+}
+
+// writeMessage writes msg as a length-prefixed message to w. It panics if the
+// length of msg cannot be represented in 16 bits.
+func writeMessage(w io.Writer, msg []byte) error {
+	length := uint16(len(msg))
+	if int(length) != len(msg) {
+		panic(len(msg))
+	}
+	err := binary.Write(w, binary.BigEndian, length)
+	if err != nil {
+		return err
+	}
+	_, err = w.Write(msg)
+	return err
+}
+
+// socket is the internal type that represents a Noise-wrapped
+// io.ReadWriteCloser.
+type socket struct {
+	recvPipe   *io.PipeReader
+	sendCipher *noise.CipherState
+	io.ReadWriteCloser
+}
+
+func newSocket(rwc io.ReadWriteCloser, recvCipher, sendCipher *noise.CipherState) *socket {
+	pr, pw := io.Pipe()
+	// This loop calls readMessage, decrypts the messages, and feeds them
+	// into recvPipe where they will be returned from Read.
+	go func() (err error) {
+		defer func() {
+			pw.CloseWithError(err)
+		}()
+		for {
+			msg, err := readMessage(rwc)
+			if err != nil {
+				return err
+			}
+			p, err := recvCipher.Decrypt(nil, nil, msg)
+			if err != nil {
+				return err
+			}
+			_, err = pw.Write(p)
+			if err != nil {
+				return err
+			}
+		}
+	}()
+	return &socket{
+		sendCipher:      sendCipher,
+		recvPipe:        pr,
+		ReadWriteCloser: rwc,
+	}
+}
+
+// Read reads decrypted data from the wrapped io.Reader.
+func (s *socket) Read(p []byte) (int, error) {
+	return s.recvPipe.Read(p)
+}
+
+// Write writes encrypted data from the wrapped io.Writer.
+func (s *socket) Write(p []byte) (int, error) {
+	total := 0
+	for len(p) > 0 {
+		n := len(p)
+		if n > 4096 {
+			n = 4096
+		}
+		msg, err := s.sendCipher.Encrypt(nil, nil, p[:n])
+		if err != nil {
+			return total, err
+		}
+		err = writeMessage(s.ReadWriteCloser, msg)
+		if err != nil {
+			return total, err
+		}
+		total += n
+		p = p[n:]
+	}
+	return total, nil
 }
 
 // newConfig instantiates configuration settings that are common to clients and
@@ -51,6 +133,85 @@ func newConfig() noise.Config {
 		Pattern:     noise.HandshakeNK,
 		Prologue:    []byte("Champa 2021-06-17"),
 	}
+}
+
+// NewClient wraps an io.ReadWriteCloser in a Noise protocol as a client, and
+// returns after completing the handshake. It returns a non-nil error if there
+// is an error during the handshake.
+func NewClient(rwc io.ReadWriteCloser, serverPubkey []byte) (io.ReadWriteCloser, error) {
+	config := newConfig()
+	config.Initiator = true
+	config.PeerStatic = serverPubkey
+	handshakeState, err := noise.NewHandshakeState(config)
+	if err != nil {
+		return nil, err
+	}
+
+	// -> e, es
+	msg, _, _, err := handshakeState.WriteMessage(nil, nil)
+	if err != nil {
+		return nil, err
+	}
+	err = writeMessage(rwc, msg)
+	if err != nil {
+		return nil, err
+	}
+
+	// <- e, es
+	msg, err = readMessage(rwc)
+	if err != nil {
+		return nil, err
+	}
+	payload, sendCipher, recvCipher, err := handshakeState.ReadMessage(nil, msg)
+	if err != nil {
+		return nil, err
+	}
+	if len(payload) != 0 {
+		return nil, errors.New("unexpected server payload")
+	}
+
+	return newSocket(rwc, recvCipher, sendCipher), nil
+}
+
+// NewClient wraps an io.ReadWriteCloser in a Noise protocol as a server, and
+// returns after completing the handshake. It returns a non-nil error if there
+// is an error during the handshake.
+func NewServer(rwc io.ReadWriteCloser, serverPrivkey []byte) (io.ReadWriteCloser, error) {
+	config := newConfig()
+	config.Initiator = false
+	config.StaticKeypair = noise.DHKey{
+		Private: serverPrivkey,
+		Public:  PubkeyFromPrivkey(serverPrivkey),
+	}
+	handshakeState, err := noise.NewHandshakeState(config)
+	if err != nil {
+		return nil, err
+	}
+
+	// -> e, es
+	msg, err := readMessage(rwc)
+	if err != nil {
+		return nil, err
+	}
+	payload, _, _, err := handshakeState.ReadMessage(nil, msg)
+	if err != nil {
+		return nil, err
+	}
+	if len(payload) != 0 {
+		return nil, errors.New("unexpected server payload")
+	}
+
+	// <- e, es
+	msg, recvCipher, sendCipher, err := handshakeState.WriteMessage(nil, nil)
+	if err != nil {
+		return nil, err
+	}
+	err = writeMessage(rwc, msg)
+	if err != nil {
+		return nil, err
+	}
+
+	return newSocket(rwc, recvCipher, sendCipher), nil
 }
 
 // GeneratePrivkey generates a private key. The corresponding private key can be
