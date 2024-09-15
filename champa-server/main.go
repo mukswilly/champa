@@ -454,7 +454,7 @@ Example:
 	} else {
 		// Ordinary server mode.
 
-		if flag.NArg() != 2 {
+		if flag.NArg() != 1 {
 			flag.Usage()
 			os.Exit(1)
 		}
