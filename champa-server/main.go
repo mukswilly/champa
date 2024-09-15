@@ -426,7 +426,7 @@ func main() {
 
 Example:
   %[1]s -gen-key -privkey-file server.key -pubkey-file server.pub
-  %[1]s -privkey-file server.key 127.0.0.1:8080 127.0.0.1:7001
+  %[1]s -privkey-file server.key 127.0.0.1:7001
 
 `, os.Args[0])
 		flag.PrintDefaults()
